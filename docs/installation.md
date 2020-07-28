@@ -2,7 +2,9 @@
 
 This document provides a guide on how to install Moonraker on a Raspberry
 Pi running Raspian/Rasperry Pi OS.  Other SBCs and/or linux distributions
-may work, however they may need a custom install script.
+may work, however they may need a custom install script.  Moonraker
+requires Python 3.7 or greater, verify that your distribution's
+Python 3 packages meet this requirement.
 
 Klipper should be installed prior to installing Moonraker.  Please see
 [Klipper's Documention](https://github.com/KevinOConnor/klipper/blob/master/docs/Installation.md)
@@ -174,8 +176,9 @@ batch subscription updates together.
 
 ## Plugin Configuration
 The core plugins are configured via the primary configuration above.  Optional
-plugins each need their own configuration.  Currently the only optional plugin
-available is the `paneldue` plugin, which can be configured as follows:
+plugins each need their own configuration as outlined below.
+
+### PanelDue Plugin
 
 ```
 [moonraker_plugin paneldue]
@@ -207,3 +210,30 @@ gcode:
 		"paneldue_beep", frequency=FREQUENCY|int,
 		duration=DURATION|float) }
 ```
+
+### Power Control Plugin
+```
+[moonraker_plugin power]
+devices: printer, led           
+#  A comma separated list of devices you wish to control. Do not use spaces in
+#  the device's name here
+#{dev}_name: Friendly Name
+#  This is the friendly name for the device. {dev} must be swapped for the name
+#  of the device used under devices, as an example:
+#  printer_name: My Printer
+{dev}_pin: 23
+#  This option is required.
+#  The GPIO Pin number you wish to control
+#{dev}_active_low: False
+#  If you have a device that needs a low or 0 signal to be turned on, set this
+#  option to True.
+```
+
+Define the devices you wish to control under _devices_ with a comma separated
+list. For device specific configrations, swap {dev} for the name of the device
+that you listed under devices.
+
+Each device can have a Friendly Name, pin, and activehigh set. Pin is the only
+required option. For devices that should be active when the signal is 0 or low,
+set {dev}_activehigh to False, otherwise don't put the option in the
+configuration.

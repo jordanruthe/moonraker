@@ -9,19 +9,17 @@ import mimetypes
 import logging
 import tornado
 from inspect import isclass
+from tornado.escape import url_unescape
 from tornado.routing import Rule, PathMatches, AnyMatches
-from utils import DEBUG, ServerError
+from utils import ServerError
 from websockets import WebsocketManager, WebSocket
 from authorization import AuthorizedRequestHandler, AuthorizedFileHandler
 from authorization import Authorization
 
-# Max Upload Size of 200MB
-MAX_UPLOAD_SIZE = 200 * 1024 * 1024
-
 # These endpoints are reserved for klippy/server communication only and are
 # not exposed via http or the websocket
 RESERVED_ENDPOINTS = [
-    "list_endpoints", "moonraker/check_ready", "moonraker/get_configuration"
+    "list_endpoints", "gcode/subscribe_output"
 ]
 
 
@@ -34,8 +32,10 @@ def _status_parser(request):
         for v in vals:
             if v:
                 parsed += v.decode().split(',')
+        if parsed == []:
+            parsed = None
         args[key] = parsed
-    return args
+    return {'objects': args}
 
 # Built-in Query String Parser
 def _default_parser(request):
@@ -77,32 +77,37 @@ class MutableRouter(tornado.web.ReversibleRuleRouter):
             try:
                 self.rules.remove(rule)
             except Exception:
-                logging.exception("Unable to remove rule: %s" % (pattern))
+                logging.exception(f"Unable to remove rule: {pattern}")
 
 class APIDefinition:
-    def __init__(self, endpoint, http_uri, ws_method,
+    def __init__(self, endpoint, http_uri, ws_methods,
                  request_methods, parser):
         self.endpoint = endpoint
         self.uri = http_uri
-        self.ws_method = ws_method
+        self.ws_methods = ws_methods
         if not isinstance(request_methods, list):
             request_methods = [request_methods]
         self.request_methods = request_methods
         self.parser = parser
 
 class MoonrakerApp:
-    def __init__(self, server, args):
-        self.server = server
+    def __init__(self, config):
+        self.server = config.get_server()
         self.tornado_server = None
         self.api_cache = {}
         self.registered_base_handlers = []
+        self.max_upload_size = config.getint('max_upload_size', 200)
+        self.max_upload_size *= 1024 * 1024
 
         # Set Up Websocket and Authorization Managers
-        self.wsm = WebsocketManager(server)
-        self.auth = Authorization(args.apikey)
+        self.wsm = WebsocketManager(self.server)
+        self.auth = Authorization(config['authorization'])
 
         mimetypes.add_type('text/plain', '.log')
         mimetypes.add_type('text/plain', '.gcode')
+        mimetypes.add_type('text/plain', '.cfg')
+        debug = config.getboolean('enable_debug_logging', True)
+        enable_cors = config.getboolean('enable_cors', False)
 
         # Set up HTTP only requests
         self.mutable_router = MutableRouter(self)
@@ -111,23 +116,24 @@ class MoonrakerApp:
             (r"/websocket", WebSocket,
              {'wsm': self.wsm, 'auth': self.auth}),
             (r"/api/version", EmulateOctoprintHandler,
-             {'server': server, 'auth': self.auth})]
+             {'server': self.server, 'auth': self.auth})]
 
         self.app = tornado.web.Application(
             app_handlers,
-            serve_traceback=DEBUG,
+            serve_traceback=debug,
             websocket_ping_interval=10,
             websocket_ping_timeout=30,
-            enable_cors=False)
+            enable_cors=enable_cors)
         self.get_handler_delegate = self.app.get_handler_delegate
 
         # Register handlers
-        self.register_static_file_handler("moonraker.log", args.logfile)
+        logfile = config['cmd_args'].get('logfile')
+        self.register_static_file_handler("moonraker.log", logfile)
         self.auth.register_handlers(self)
 
     def listen(self, host, port):
         self.tornado_server = self.app.listen(
-            port, address=host, max_body_size=MAX_UPLOAD_SIZE,
+            port, address=host, max_body_size=self.max_upload_size,
             xheaders=True)
 
     async def close(self):
@@ -136,53 +142,50 @@ class MoonrakerApp:
         await self.wsm.close()
         self.auth.close()
 
-    def load_config(self, config):
-        if 'enable_cors' in config:
-            self.app.settings['enable_cors'] = config['enable_cors']
-        self.auth.load_config(config)
-
     def register_remote_handler(self, endpoint):
         if endpoint in RESERVED_ENDPOINTS:
             return
-        api_def = self.api_cache.get(
-            endpoint, self._create_api_definition(endpoint))
+        api_def = self._create_api_definition(endpoint)
         if api_def.uri in self.registered_base_handlers:
             # reserved handler or already registered
             return
-        logging.info("Registering remote endpoint: (%s) %s" % (
-            " ".join(api_def.request_methods), api_def.uri))
-        self.wsm.register_handler(api_def)
+        logging.info(
+            f"Registering remote endpoint - "
+            f"HTTP: ({' '.join(api_def.request_methods)}) {api_def.uri}; "
+            f"Websocket: {', '.join(api_def.ws_methods)}")
+        self.wsm.register_remote_handler(api_def)
         params = {}
         params['server'] = self.server
         params['auth'] = self.auth
-        params['methods'] = api_def.request_methods
         params['arg_parser'] = api_def.parser
         params['remote_callback'] = api_def.endpoint
         self.mutable_router.add_handler(
             api_def.uri, RemoteRequestHandler, params)
         self.registered_base_handlers.append(api_def.uri)
 
-    def register_local_handler(self, uri, ws_method, request_methods,
-                               callback, http_only=False):
+    def register_local_handler(self, uri, request_methods,
+                               callback, protocol=["http", "websocket"]):
         if uri in self.registered_base_handlers:
             return
         api_def = self._create_api_definition(
-            uri, ws_method, request_methods)
-        logging.info("Registering local endpoint: (%s) %s" % (
-            " ".join(request_methods), uri))
-        if not http_only:
-            self.wsm.register_handler(api_def, callback)
-        params = {}
-        params['server'] = self.server
-        params['auth'] = self.auth
-        params['methods'] = request_methods
-        params['arg_parser'] = api_def.parser
-        params['callback'] = callback
-        self.mutable_router.add_handler(uri, LocalRequestHandler, params)
-        self.registered_base_handlers.append(uri)
+            uri, request_methods, is_remote=False)
+        msg = "Registering local endpoint"
+        if "http" in protocol:
+            msg += f" - HTTP: ({' '.join(request_methods)}) {uri}"
+            params = {}
+            params['server'] = self.server
+            params['auth'] = self.auth
+            params['methods'] = request_methods
+            params['arg_parser'] = api_def.parser
+            params['callback'] = callback
+            self.mutable_router.add_handler(uri, LocalRequestHandler, params)
+            self.registered_base_handlers.append(uri)
+        if "websocket" in protocol:
+            msg += f" - Websocket: {', '.join(api_def.ws_methods)}"
+            self.wsm.register_local_handler(api_def, callback)
+        logging.info(msg)
 
-    def register_static_file_handler(self, pattern, file_path,
-                                     can_delete=False, op_check_cb=None):
+    def register_static_file_handler(self, pattern, file_path):
         if pattern[0] != "/":
             pattern = "/server/files/" + pattern
         if os.path.isfile(file_path):
@@ -192,20 +195,14 @@ class MoonrakerApp:
                 pattern += "/"
             pattern += "(.*)"
         else:
-            logging.info("Invalid file path: %s" % (file_path))
+            logging.info(f"Invalid file path: {file_path}")
             return
-        methods = ['GET']
-        if can_delete:
-            methods.append('DELETE')
-        params = {
-            'server': self.server, 'auth': self.auth,
-            'path': file_path, 'methods': methods, 'op_check_cb': op_check_cb}
+        logging.debug(f"Registering static file: ({pattern}) {file_path}")
+        params = {'server': self.server, 'auth': self.auth, 'path': file_path}
         self.mutable_router.add_handler(pattern, FileRequestHandler, params)
 
-    def register_upload_handler(self, pattern, upload_path, op_check_cb=None):
-        params = {
-            'server': self.server, 'auth': self.auth,
-            'path': upload_path, 'op_check_cb': op_check_cb}
+    def register_upload_handler(self, pattern):
+        params = {'server': self.server, 'auth': self.auth}
         self.mutable_router.add_handler(pattern, FileUploadHandler, params)
 
     def remove_handler(self, endpoint):
@@ -214,56 +211,68 @@ class MoonrakerApp:
             self.wsm.remove_handler(api_def.uri)
             self.mutable_router.remove_handler(api_def.ws_method)
 
-    def _create_api_definition(self, endpoint, ws_method=None,
-                               request_methods=['GET', 'POST']):
+    def _create_api_definition(self, endpoint, request_methods=[],
+                               is_remote=True):
         if endpoint in self.api_cache:
             return self.api_cache[endpoint]
         if endpoint[0] == '/':
             uri = endpoint
-        else:
+        elif is_remote:
             uri = "/printer/" + endpoint
-        if ws_method is None:
-            ws_method = uri[1:].replace('/', '_')
+        else:
+            uri = "/server/" + endpoint
+        ws_methods = []
+        if is_remote:
+            # Remote requests accept both GET and POST requests.  These
+            # requests execute the same callback, thus they resolve to
+            # only a single websocket method.
+            ws_methods.append(uri[1:].replace('/', '.'))
+            request_methods = ['GET', 'POST']
+        else:
+            name_parts = uri[1:].split('/')
+            if len(request_methods) > 1:
+                for req_mthd in request_methods:
+                    func_name = req_mthd.lower() + "_" + name_parts[-1]
+                    ws_methods.append(".".join(name_parts[:-1] + [func_name]))
+            else:
+                ws_methods.append(".".join(name_parts))
+        if not is_remote and len(request_methods) != len(ws_methods):
+            raise self.server.error(
+                "Invalid API definition.  Number of websocket methods must "
+                "match the number of request methods")
         if endpoint.startswith("objects/"):
             parser = _status_parser
         else:
             parser = _default_parser
-        api_def = APIDefinition(endpoint, uri, ws_method,
+
+        api_def = APIDefinition(endpoint, uri, ws_methods,
                                 request_methods, parser)
         self.api_cache[endpoint] = api_def
         return api_def
 
 # ***** Dynamic Handlers*****
 class RemoteRequestHandler(AuthorizedRequestHandler):
-    def initialize(self, remote_callback, server, auth,
-                   methods, arg_parser):
+    def initialize(self, remote_callback, server, auth, arg_parser):
         super(RemoteRequestHandler, self).initialize(server, auth)
         self.remote_callback = remote_callback
-        self.methods = methods
         self.query_parser = arg_parser
 
     async def get(self):
-        if 'GET' in self.methods:
-            await self._process_http_request('GET')
-        else:
-            raise tornado.web.HTTPError(405)
+        await self._process_http_request()
 
     async def post(self):
-        if 'POST' in self.methods:
-            await self._process_http_request('POST')
-        else:
-            raise tornado.web.HTTPError(405)
+        await self._process_http_request()
 
-    async def _process_http_request(self, method):
+    async def _process_http_request(self):
         args = {}
         if self.request.query:
             args = self.query_parser(self.request)
-        request = self.server.make_request(
-            self.remote_callback, method, args)
-        result = await request.wait()
-        if isinstance(result, ServerError):
+        try:
+            result = await self.server.make_request(
+                self.remote_callback, args)
+        except ServerError as e:
             raise tornado.web.HTTPError(
-                result.status_code, str(result))
+                e.status_code, str(e)) from e
         self.finish({'result': result})
 
 class LocalRequestHandler(AuthorizedRequestHandler):
@@ -300,115 +309,46 @@ class LocalRequestHandler(AuthorizedRequestHandler):
             result = await self.callback(self.request.path, method, args)
         except ServerError as e:
             raise tornado.web.HTTPError(
-                e.status_code, str(e))
+                e.status_code, str(e)) from e
         self.finish({'result': result})
 
 
 class FileRequestHandler(AuthorizedFileHandler):
-    def initialize(self, server, auth, path, methods,
-                   op_check_cb=None, default_filename=None):
-        super(FileRequestHandler, self).initialize(
-            server, auth, path, default_filename)
-        self.methods = methods
-        self.op_check_cb = op_check_cb
-
     def set_extra_headers(self, path):
         # The call below shold never return an empty string,
         # as the path should have already been validated to be
         # a file
         basename = os.path.basename(self.absolute_path)
         self.set_header(
-            "Content-Disposition", "attachment; filename=%s" % (basename))
+            "Content-Disposition", f"attachment; filename={basename}")
 
     async def delete(self, path):
-        if 'DELETE' not in self.methods:
-            raise tornado.web.HTTPError(405)
-
-        # Use the same method Tornado uses to validate the path
-        self.path = self.parse_url_path(path)
-        del path  # make sure we don't refer to path instead of self.path again
-        absolute_path = self.get_absolute_path(self.root, self.path)
-        self.absolute_path = self.validate_absolute_path(
-            self.root, absolute_path)
-
-        if self.op_check_cb is not None:
-            try:
-                await self.op_check_cb(self.absolute_path)
-            except ServerError as e:
-                if e.status_code == 403:
-                    raise tornado.web.HTTPError(
-                        403, "File is loaded, DELETE not permitted")
-
-        os.remove(self.absolute_path)
-        filename = os.path.basename(self.absolute_path)
-        self.server.notify_filelist_changed(filename, 'removed')
+        path = self.request.path.lstrip("/").split("/", 2)[-1]
+        path = url_unescape(path)
+        file_manager = self.server.lookup_plugin('file_manager')
+        try:
+            filename = await file_manager.delete_file(path)
+        except self.server.error as e:
+            if e.status_code == 403:
+                raise tornado.web.HTTPError(
+                    403, "File is loaded, DELETE not permitted")
+            else:
+                raise tornado.web.HTTPError(e.status_code, str(e))
         self.finish({'result': filename})
 
 class FileUploadHandler(AuthorizedRequestHandler):
-    def initialize(self, server, auth, path, op_check_cb=None,):
+    def initialize(self, server, auth):
         super(FileUploadHandler, self).initialize(server, auth)
-        self.op_check_cb = op_check_cb
-        self.file_path = path
 
     async def post(self):
-        start_print = False
-        dir_path = ""
-        print_args = self.request.arguments.get('print', [])
-        path_args = self.request.arguments.get('path', [])
-        if print_args:
-            start_print = print_args[0].decode().lower() == "true"
-        if path_args:
-            dir_path = path_args[0].decode().lstrip("/")
-        upload = self.get_file()
-        filename = "_".join(upload['filename'].strip().split()).lstrip("/")
-        if dir_path:
-            filename = os.path.join(dir_path, filename)
-        full_path = os.path.join(self.file_path, filename)
-        # Make sure the file isn't currently loaded
-        ongoing = False
-        if self.op_check_cb is not None:
-            try:
-                ongoing = await self.op_check_cb(full_path)
-            except ServerError as e:
-                if e.status_code == 403:
-                    raise tornado.web.HTTPError(
-                        403, "File is loaded, upload not permitted")
-                else:
-                    # Couldn't reach Klippy, so it should be safe
-                    # to permit the upload but not start
-                    start_print = False
-
-        # Don't start if another print is currently in progress
-        start_print = start_print and not ongoing
+        file_manager = self.server.lookup_plugin('file_manager')
         try:
-            if dir_path:
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-            with open(full_path, 'wb') as fh:
-                fh.write(upload['body'])
-            self.server.notify_filelist_changed(filename, 'added')
-        except Exception:
-            raise tornado.web.HTTPError(500, "Unable to save file")
-        if start_print:
-            # Make a Klippy Request to "Start Print"
-            gcode_apis = self.server.lookup_plugin('gcode_apis')
-            try:
-                await gcode_apis.gcode_start_print(
-                    self.request.path, 'POST', {'filename': filename})
-            except ServerError:
-                # Attempt to start print failed
-                start_print = False
-        self.finish({'result': filename, 'print_started': start_print})
+            result = await file_manager.process_file_upload(self.request)
+        except ServerError as e:
+            raise tornado.web.HTTPError(
+                e.status_code, str(e))
+        self.finish(result)
 
-    def get_file(self):
-        # File uploads must have a single file request
-        if len(self.request.files) != 1:
-            raise tornado.web.HTTPError(
-                400, "Bad Request, can only process a single file upload")
-        f_list = list(self.request.files.values())[0]
-        if len(f_list) != 1:
-            raise tornado.web.HTTPError(
-                400, "Bad Request, can only process a single file upload")
-        return f_list[0]
 
 class EmulateOctoprintHandler(AuthorizedRequestHandler):
     def get(self):

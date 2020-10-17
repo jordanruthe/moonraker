@@ -37,23 +37,31 @@ that uses promises to return responses and errors (see json-rcp.js).
   `GET /printer/info`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_printer_info", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.info", id: <request id>}`
 
 - Returns:\
-  An object containing the build version, cpu info, and if the Klippy
-  process is ready for operation.  The latter is useful when a client connects
-  after the klippy state event has been broadcast.
+  An object containing the build version, cpu info, Klippy's current state.
 
-  `{version: "<version>", cpu: "<cpu_info>", is_ready: <boolean>,
-    hostname: "<hostname>", error_detected: <boolean>,
-    message: "<current state message>"}`
+    ```json
+    {
+      state: "<klippy state>",
+      state_message: "<current state message>",
+      hostname: "<hostname>",
+      software_version: "<version>",
+      cpu_info: "<cpu_info>",
+      klipper_path: "<moonraker use only>",
+      python_path: "<moonraker use only>",
+      log_file: "<moonraker use only>",
+      config_file: "<moonraker use only>",
+    }
+    ```
 
 ### Emergency Stop
 - HTTP command:\
   `POST /printer/emergency_stop`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_emergency_stop", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.emergency_stop", id: <request id>}`
 
 - Returns:\
   `ok`
@@ -63,7 +71,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /printer/restart`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_restart", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.restart", id: <request id>}`
 
 - Returns:\
   `ok`
@@ -73,7 +81,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /printer/firmware_restart`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_firmware_restart", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.firmware_restart", id: <request id>}`
 
 - Returns:\
   `ok`
@@ -85,44 +93,19 @@ that uses promises to return responses and errors (see json-rcp.js).
   `GET /printer/objects/list`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_printer_objects_list", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.objects.list", id: <request id>}`
 
 - Returns:\
-  An object containing key, value pairs, where the key is the name of the
-  Klippy module available for status query, and the value is an array of
-  strings containing that module's available attributes.
+  An a list of "printer objects" that are currently available for query
+  or subscription.  This list will be passed in an "objects" parameter.
 
   ```json
-  { gcode: ["busy", "gcode_position", ...],
-    toolhead: ["position", "status"...], ...}
+  { objects: ["gcode", "toolhead", "bed_mesh", "configfile",....]}
   ```
 
-### Request currently subscribed objects:
-- HTTP command:
-  `GET /printer/objects/subscription`
-
-- Websocket command:\
-  `{jsonrpc: "2.0", method: "get_printer_objects_subscription", id: <request id>}`
-
-- Returns:\
-  An object of the similar that above, however the format of the `result`
-  value is changed to include poll times:
-
-   ```json
-  { objects: {
-      gcode: ["busy", "gcode_position", ...],
-      toolhead: ["position", "status"...],
-      ...},
-    poll_times: {
-      gcode: .25,
-      toolhead: .25,
-      ...}
-    }
-  ```
-
-### Request the a status update for an object, or group of objects:
+### Query the a status for an object, or group of objects:
 - HTTP command:\
-  `GET /printer/objects/status?gcode`
+  `GET /printer/objects/query?gcode`
 
   The above will fetch a status update for all gcode attributes.  The query
   string can contain multiple items, and specify individual attributes:
@@ -130,47 +113,73 @@ that uses promises to return responses and errors (see json-rcp.js).
   `?gcode=gcode_position,busy&toolhead&extruder=target`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_printer_objects_status", params:
-    {gcode: [], toolhead: ["position", "status"]}, id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.objects.query", params:
+    {objects: {gcode: [], toolhead: ["position", "status"]}},
+     id: <request id>}`
 
   Note that an empty array will fetch all available attributes for its key.
 
 - Returns:\
-  An object where the top level keys are the requested Klippy objects, as shown
-  below:
+  An object where the top level items are "eventtime" and "status".  The
+  "status" item contains data about the requested update.
 
   ```json
-  { gcode: {
-      busy: true,
-      gcode_position: [0, 0, 0 ,0],
-      ...},
-    toolhead: {
-      position: [0, 0, 0, 0],
-      status: "Ready",
-      ...},
-    ...}
+  {
+    eventtime: <klippy time of update>,
+    status: {
+      gcode: {
+        busy: true,
+        gcode_position: [0, 0, 0 ,0],
+        ...},
+      toolhead: {
+        position: [0, 0, 0, 0],
+        status: "Ready",
+        ...},
+      ...}
+    }
   ```
 ### Subscribe to a status request or a batch of status requests:
 - HTTP command:\
-  `POST /printer/objects/subscription?gcode=gcode_position,bus&extruder=target`
+  `POST /printer/objects/subscribe?gcode=gcode_position,bus&extruder=target`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_objects_subscription", params:
-    {gcode: [], toolhead: ["position", "status"]}, id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.objects.subscribe", params:
+    {objects: {gcode: [], toolhead: ["position", "status"]}},
+    id: <request id>}`
 
 - Returns:\
-  An acknowledgement that the request has been received:
+  Status data for all currently subscribed objects, with the format matching that of
+  the `/printer/objects/query`:
 
-  `ok`
+  ```json
+  {
+    eventtime: <klippy time of update>,
+    status: {
+      gcode: {
+        busy: true,
+        gcode_position: [0, 0, 0 ,0],
+        ...},
+      toolhead: {
+        position: [0, 0, 0, 0],
+        status: "Ready",
+        ...},
+      ...}
+    }
+  ```
+  Note that Moonraker's current behavior is to maintain a superset of all
+  subscriptions, thus you may receive updates for objects that you did not
+  request.  This behavior is subject to change in the future (where each
+  client receives only the subscriptions it requested).
 
-  The actual status updates will be sent asynchronously over the websocket.
+  Future updates for subscribed objects are sent asynchronously over the
+  websocket.  See the `notify_status_update` notification for details.
 
 ### Query Endstops
 - HTTP command:\
   `GET /printer/query_endstops/status`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_printer_query_endstops_status", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.query_endstops.status", id: <request id>}`
 
 - Returns:\
   An object containing the current endstop state, with each attribute in the
@@ -183,12 +192,35 @@ that uses promises to return responses and errors (see json-rcp.js).
    z: "open"}
 ```
 
+### Query Server Info
+- HTTP command:\
+  `GET /server/info`
+
+- Websocket command:
+  `{jsonrpc: "2.0", method: "server.info", id: <request id>}`
+
+- Returns:\
+  An object containing the server's state, structured as follows:
+
+```json
+  {
+    klippy_connected: <bool>,
+    klippy_state: <string>,
+    plugins: [<strings>]
+  }
+```
+  Note that `klippy_state` will match the `state` value received from
+  `/printer/info`. The `klippy_connected` item tracks the state of the
+  connection to Klippy. The `plugins` key will return a list of all
+  enabled plugins.  This can be used by clients to check if an optional
+  plugin is available.
+
 ### Fetch stored temperature data
 - HTTP command:\
   `GET /server/temperature_store`
 
 - Websocket command:
-  `{jsonrpc: "2.0", method: "get_temperature_store", id: <request id>}`
+  `{jsonrpc: "2.0", method: "server.temperature_store", id: <request id>}`
 
 - Returns:\
   An object where the keys are the available temperature sensor names, and with
@@ -196,6 +228,32 @@ that uses promises to return responses and errors (see json-rcp.js).
   1 second by default, containing a total of 1200 values (20 minutes).  The
   array is organized from oldest temperature to most recent (left to right).
   Note that when the host starts each array is initialized to 0s.
+
+### Fetch stored gcode info
+- HTTP command:\
+  `GET /server/gcode_store`
+
+  Optionally, a `count` argument may be added to specify the number of lines fetch.
+  If omitted, the entire gcode store will be sent (up to 1000 lines).
+
+  `GET /server/gcode_store?count=100`
+
+- Websocket command:
+  `{jsonrpc: "2.0", method: "server.gcode_store", id: <request id>}`
+
+  OR
+  `{jsonrpc: "2.0", method: "server.gcode_store",
+   params: {count: <integer>} id: <request id>}`
+
+- Returns:\
+  An object which includes a string containing up to 1000 lines of
+  stored gcode responses.  Each line will be separated by a newline
+  character:
+```json
+  {
+    gcode_store: <string>
+  }
+```
 
 ## Gcode Controls
 
@@ -208,7 +266,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   Will echo "Hello" to the terminal.
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_gcode_script",
+  `{jsonrpc: "2.0", method: "printer.gcode.script",
     params: {script: <gc>}, id: <request id>}`
 
 - Returns:\
@@ -221,7 +279,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `GET /printer/gcode/help`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_printer_gcode_help",
+  `{jsonrpc: "2.0", method: "printer.gcode.help",
     params: {script: <gc>}, id: <request id>}`
 
 - Returns:\
@@ -236,7 +294,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /printer/print/start?filename=<file name>`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_print_start",
+  `{jsonrpc: "2.0", method: "printer.print.start",
     params: {filename: <file name>, id:<request id>}`
 
 - Returns:\
@@ -247,7 +305,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /printer/print/pause`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_print_pause", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.print.pause", id: <request id>}`
 
 - Returns:\
   `ok`
@@ -257,7 +315,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /printer/print/resume`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_print_resume", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.print.resume", id: <request id>}`
 
 - Returns:\
   `ok`
@@ -267,7 +325,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /printer/print/cancel`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_printer_print_cancel", id: <request id>}`
+  `{jsonrpc: "2.0", method: "printer.print.cancel", id: <request id>}`
 
 - Returns:\
   `ok`
@@ -279,7 +337,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /machine/shutdown`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_machine_shutdown", id: <request id>}`
+  `{jsonrpc: "2.0", method: "machine.shutdown", id: <request id>}`
 
 - Returns:\
   No return value as the server will shut down upon execution
@@ -289,7 +347,7 @@ that uses promises to return responses and errors (see json-rcp.js).
   `POST /machine/reboot`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_machine_reboot", id: <request id>}`
+  `{jsonrpc: "2.0", method: "machine.reboot", id: <request id>}`
 
 - Returns:\
   No return value as the server will shut down upon execution
@@ -299,11 +357,18 @@ that uses promises to return responses and errors (see json-rcp.js).
 
 Most file operations are available over both APIs, however file upload,
 file download, and file delete are currently only available via HTTP APIs.
-Aside from the log files, currently the only root available is "gcodes"
-(at `http:\\host\server\files\gcodes\*`), however support for other "root"
-directories may be added in the future.  File upload, file delete, and
-directory manipulation(mkdir and rmdir) will only be available on the "gcodes"
-root.
+
+Moonraker organizes different local directories into "roots".  For example,
+gcodes are located at `http:\\host\server\files\gcodes\*`, otherwise known
+as the "gcodes" root.  The following roots are available:
+- gcodes
+- config
+- config_examples (read-only)
+
+Write operations (upload, delete, make directory, remove directory) are
+only available on the `gcodes` and config roots.  Note that the `config` root
+is only available if the "config_path" option has been set in Moonraker's
+configuration.
 
 ### List Available Files
 Walks through a directory and fetches all files.  All file names include a
@@ -316,7 +381,7 @@ path relative to the specified "root".  Note that if the query st
   the "gcodes" file list by default.
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_file_list", params: {root: "gcodes"}
+  `{jsonrpc: "2.0", method: "server.files.list", params: {root: "gcodes"}
   , id: <request id>}`
 
   If `params` are are omitted then the command will return the "gcodes"
@@ -344,7 +409,7 @@ path relative to the specified "root".  Note that if the query st
   `GET /server/files/metadata?filename=<filename>`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_file_metadata", params: {filename: "filename"}
+  `{jsonrpc: "2.0", method: "server.files.metadata", params: {filename: "filename"}
   , id: <request id>}`
 
 - Returns:\
@@ -355,14 +420,17 @@ path relative to the specified "root".  Note that if the query st
 ```json
   {
     filename: "file name",
-    size: <file size>,
+    size: <file_size>,
     modified: "last modified date",
     slicer: "Slicer Name",
-    first_layer_height: <in mm>,
-    layer_height: <in mm>,
-    object_height: <in mm>,
+    slicer_version: "<version>",
+    first_layer_height: <mm>,
+    first_layer_bed_temp: <C>,
+    first_layer_extr_temp: <C>,
+    layer_height: <mm>,
+    object_height: <mm>,
     estimated_time: <time in seconds>,
-    filament_total: <in mm>,
+    filament_total: <mm>,
     thumbnails: [
       {
         width: <in pixels>,
@@ -386,8 +454,8 @@ subdirectories.
   the "gcodes" file list by default.
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "get_directory", params: {path: "gcodes/my_subdir"}
-  , id: <request id>}`
+  `{jsonrpc: "2.0", method: "server.files.get_directory",
+   params: {path: "gcodes/my_subdir"} , id: <request id>}`
 
   If the "params" are omitted then the command will return
   the "gcodes" file list by default.
@@ -421,7 +489,7 @@ Creates a new directory at the specified path.
   `POST /server/files/directory?path=gcodes/my_new_dir`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_directory", params:
+  `{jsonrpc: "2.0", method: "server.files.post_directory", params:
    {path: "gcodes/my_new_dir"}, id: <request id>}`
 
 Returns:\
@@ -434,8 +502,8 @@ Deletes a directory at the specified path.
   `DELETE /server/files/directory?path=gcodes/my_subdir`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "delete_directory", params: {path: "gcodes/my_subdir"}
-  , id: <request id>}`
+  `{jsonrpc: "2.0", method: "server.files.delete_directory", params:
+   {path: "gcodes/my_subdir"} , id: <request id>}`
 
   If the specified directory contains files then the delete request
   will fail, however it is possible to "force" deletion of the directory
@@ -456,37 +524,42 @@ Deletes a directory at the specified path.
 Moves a file or directory from one location to another. Note that the following
 conditions must be met for a move successful move:
 - The source must exist
+- The source and destinations must have the same "root" directory
 - The user (typically "Pi") must have the appropriate file permissions
 - Neither the source nor destination can be loaded by the virtual_sdcard.
   If the source or destination is a directory, it cannot contain a file
   loaded by the virtual_sdcard.
 
-When specifying the `source` and `dest`, the "root" directory should be prefixed.
-Currently the only supported root is "gcodes/".
+When specifying the `source` and `dest`, the "root" directory should be
+prefixed. Currently the only supported roots are "gcodes/" and "config/".
 
-This API may also be used to rename a file or directory.   Be aware that an attempt
-to rename a directory to a directory that already exists will result in *moving* the
-source directory to the destination directory.
+This API may also be used to rename a file or directory.   Be aware that an
+attempt to rename a directory to a directory that already exists will result
+in *moving* the source directory to the destination directory.
 
 - HTTP command:\
-  `POST /server/files/move?source=gcodes/my_file.gcode&dest=gcodes/subdir/my_file.gcode`
+  `POST /server/files/move?source=gcodes/my_file.gcode
+  &dest=gcodes/subdir/my_file.gcode`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_file_move", params: {source: "gcodes/my_file.gcode",
+  `{jsonrpc: "2.0", method: "server.files.move", params:
+   {source: "gcodes/my_file.gcode",
    dest: "gcodes/subdir/my_file.gcode"}, id: <request id>}`
 
 ### Copy a file or directory
 Copies a file or directory from one location to another.  A successful copy has
 the pre-requesites as a move with one exception, a copy may complete if the
-source file/directory is loaded by the virtual_sdcard.  As with the move API, the
-source and destination should have the root prefixed.
+source file/directory is loaded by the virtual_sdcard.  As with the move API,
+the source and destination should have the root prefixed.
 
 - HTTP command:\
-  `POST /server/files/copy?source=gcodes/my_file.gcode&dest=gcodes/subdir/my_file.gcode`
+  `POST /server/files/copy?source=gcodes/my_file.gcode
+   &dest=gcodes/subdir/my_file.gcode`
 
 - Websocket command:\
-  `{jsonrpc: "2.0", method: "post_file_copy", params: {source: "gcodes/my_file.gcode",
-    dest: "gcodes/subdir/my_file.gcode"}, id: <request id>}`
+  `{jsonrpc: "2.0", method: "server.files.copy", params:
+   {source: "gcodes/my_file.gcode", dest: "gcodes/subdir/my_file.gcode"},
+   id: <request id>}`
 
 ### Gcode File Download
 - HTTP command:\
@@ -499,35 +572,90 @@ source and destination should have the root prefixed.
   The requested file
 
 ### File Upload
-Upload a file to the "gcodes" root.  A relative path may be added to the file
-to upload to a subdirectory.
+Upload a file.  Currently files may be uploaded to the "gcodes" or "config"
+root, with "gcodes" being the default location.  If one wishes to upload
+to a subdirectory, the path may be added to the upload's file name
+(relative to the root). If the directory does not exist an error will be
+returned.  Alternatively, the "path" argument may be set, as explained
+below.
 
 - HTTP command:\
   `POST /server/files/upload`
 
   The file to be uploaded should be added to the FormData per the XHR spec.
-  Optionally, a "print" attribute may be added to the form data.  If set
-  to "true", Klippy will attempt to start the print after uploading.  Note that
-  this value should be a string type, not boolean. This provides compatibility
-  with Octoprint's legacy upload API.
+  The following arguments may be added to the form:
+  - root: The root location in which to upload the file.  Currently this may
+    be "gcodes" or "config".  If not specified the default is "gcodes".
+  - path: This argument may contain a path (relative to the root) indicating
+    a subdirectory to which the file is written. If a "path" is present, the
+    server will attempt to create any subdirectories that do not exist.
+  Arguments available only for the "gcodes" root:
+  - print: If set to "true", Klippy will attempt to start the print after
+    uploading.  Note that this value should be a string type, not boolean. This
+    provides compatibility with Octoprint's legacy upload API.
 
 - Websocket command:\
   Not Available
 
 - Returns:\
-  The HTTP API returns the file name along with a successful response.
+  The file name along with a successful response.
+  ```json
+  {'result': "file_name"}
+  ```
+  If the supplied root is "gcodes", a "print_started" attribute is also
+   returned.
+  ```json
+  {'result': "file_name", 'print_started': <boolean>}
+  ```
 
-### GCode File Delete
+### Gcode File Delete
 Delete a file in the "gcodes" root.  A relative path may be added to the file
 to delete a file in a subdirectory.
 - HTTP command:\
   `DELETE /server/files/gcodes/<file_name>`
 
 - Websocket command:\
-  Not Available
+  `{jsonrpc: "2.0", method: "server.files.delete_file", params:
+   {path: "gcodes/<file_name>"}, id: <request id>}`
+
+   If the gcode file exists within a subdirectory, the relative
+   path should be included in the file name.
 
 - Returns:\
   The HTTP request returns the name of the deleted file.
+
+### Download included config file
+- HTTP command:\
+  `GET /server/files/config/<file_name>`
+
+- Websocket command:\
+  Not Available
+
+- Returns:\
+  The requested file
+
+### Delete included config file
+Delete a file in the "config" root.  A relative path may be added to the file
+to delete a file in a subdirectory.
+- HTTP command:\
+  `DELETE /server/files/config/<file_name>`
+
+- Websocket command:\
+  `{jsonrpc: "2.0", method: "server.files.delete_file", params:
+   {path: "config/<file_name>}, id: <request id>}`
+
+- Returns:\
+  The HTTP request returns the name of the deleted file.
+
+### Download a config example
+- HTTP command:\
+  `GET /server/files/config_examples/<file_name>`
+
+- Websocket command:\
+  Not Available
+
+- Returns:\
+  The requested file
 
 ### Download klippy.log
 - HTTP command:\
@@ -600,11 +728,16 @@ Printer generated events are sent over the websocket as JSON-RPC 2.0
 notifications.  These notifications are sent to all connected clients
 in the following format:
 
-`{jsonrpc: "2.0", method: <event method name>, params: [<event state>]}`
+`{jsonrpc: "2.0", method: <event method name>}`
 
-It is important to keep in mind that the `params` value will always be
+OR
+
+`{jsonrpc: "2.0", method: <event method name>, params: [<event parameter>]}`
+
+If a notification has parameters,  the `params` value will always be
 wrapped in an array as directed by the JSON-RPC standard.  Currently
-all notifications available are broadcast with a single parameter.
+all notifications available are broadcast with either no parameters
+or a single parameter.
 
 ### Gcode response:
 All calls to gcode.respond() are forwarded over the websocket.  They arrive
@@ -618,38 +751,88 @@ Status Subscriptions arrive as a "notify_status_update" notification:
 `{jsonrpc: "2.0", method: "notify_status_update", params: [<status_data>]}`
 
 The structure of the status data is identical to the structure that is
-returned from a status request.
+returned from an object query's "status" attribute.
 
-### Klippy Process State Changed:
-The following Klippy state changes are broadcast over the websocket:
-- ready
-- disconnect
-- shutdown
+### Klippy Disconnected:
+Notify clients when Moonraker's connection to Klippy has terminated
 
-Note that Klippy's "ready" is different from the Printer's "ready".  The
-Klippy "ready" state is broadcast upon startup after initialization is
-complete.  It should also be noted that the websocket will be disconnected
-after the "disconnect" state, as that notification is broadcast prior to a
-restart. Klippy State notifications are broadcast in the following format:
-
-`{jsonrpc: "2.0", method: "notify_klippy_state_changed", params: [<state>]}`
+`{jsonrpc: "2.0", method: "notify_klippy_disconnected"}`
 
 ### File List Changed
 When a client makes a change to the virtual sdcard file list
 (via upload or delete) a notification is broadcast to alert all connected
 clients of the change:
 
-`{jsonrpc: "2.0", method: "notify_filelist_changed", params: [<file changed info>]}`
+`{jsonrpc: "2.0", method: "notify_filelist_changed",
+ params: [<file changed info>]}`
 
-The <file changed info> param is an object in the following format:
+The <file changed info> param is an object in the following format, where
+the "action" is the operation that prompted the change, and the "item"
+contains information about the item that has changed:
 
 ```json
-{action: "<action>", filename: "<file_name>", filelist: [<file_list>]}
+{action: "<action>",
+  item: {
+    path: "<file or directory path>",
+    root: "<root_name>",
+    size: <file size>,
+    modified: "<date modified>"
+ }
+```
+Note that file move and copy actions also include a "source item" that
+contains the path and root of the source file or directory.
+```json
+{action: "<action>",
+  item: {
+    path: "<file or directory path>",
+    root: "<root_name>",
+    size: <file size>,
+    modified: "<date modified>"
+ },
+  source_item: {
+    path: "<file or directory path>",
+    root: "<root_name>"
+  }
+}
 ```
 
-The `action` is the operation that resulted in a file list change, the `filename`
-is the name of the file the action was performed on, and the `filelist` is the current
-file list, returned in the same format as `get_file_list`.
+The following `actions` are currently available:
+- `upload_file`
+- `delete_file`
+- `create_dir`
+- `delete_dir`
+- `move_item`
+- `copy_item`
+
+### Metadata Update
+When a new file is uploaded via the API a websocket notification is broadcast
+to all connected clients after parsing is complete:
+
+`{jsonrpc: "2.0", method: "notify_metadata_update", params: [metadata]}`
+
+Where `metadata` is an object in the following format:
+
+```json
+{
+  filename: "file name",
+  size: <file size>,
+  modified: "last modified date",
+  slicer: "Slicer Name",
+  first_layer_height: <in mm>,
+  layer_height: <in mm>,
+  object_height: <in mm>,
+  estimated_time: <time in seconds>,
+  filament_total: <in mm>,
+  thumbnails: [
+    {
+      width: <in pixels>,
+      height: <in pixels>,
+      size: <length of string>,
+      data: <base64 string>
+    }, ...
+  ]
+}
+```
 
 # Appendix
 
@@ -680,21 +863,20 @@ The following startup sequence is recommened for clients which make use of
 the websocket:
 1) Attempt to connect to `/websocket` until successful using a timer-like
    mechanism
-2) Once connected, query `/printer/info` (or `get_printer_info`) for the ready
+2) Once connected, query `/printer/info` (or `printer.info`) for the ready
    status.
    - If the response returns an error (such as 404), set a timeout for
      2 seconds and try again.
-   - If the response returns success, check the result's `is_ready` attribute
-     to determine if Klipper is ready.
-     - If Klipper is ready you may proceed to request status of printer objects
+   - If the response returns success, check the result's `state` attribute
+     - If `state == "ready"` you may proceed to request status of printer objects
        make subscriptions, get the file list, etc.
-     - If not ready check `error_detected` to see if Klippy has experienced an
-       error.
+     - If `state == "error"` then Klippy has experienced an error
        - If an error is detected it might be wise to prompt the user.  You can
-         get a description of the error from the `message` attribute
-       - If no error then re-request printer info in 2s.
+         get a description of the error from the `state_message` attribute
+     - If `state == "shutdown"` then Klippy is in a shutdown state.
+     - If `state == "startup"` then re-request printer info in 2s.
 - Repeat step 2s until Klipper reports ready.  T
-- Client's should watch for the `notify_klippy_state_changed` event.  If it reports
+- Client's should watch for the `notify_klippy_disconnected` event.  If it reports
   disconnected then Klippy has either been stopped or restarted.  In this
   instance the client should repeat the steps above to determine when
   klippy is ready.

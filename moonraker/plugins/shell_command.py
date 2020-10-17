@@ -19,6 +19,7 @@ class ShellCommand:
         cmd = os.path.expanduser(cmd)
         self.command = shlex.split(cmd)
         self.partial_output = b""
+        self.cancelled = False
 
     def _process_output(self, fd, events):
         if events & IOLoop.ERROR:
@@ -40,7 +41,14 @@ class ShellCommand:
         except Exception:
             logging.exception("Error writing command output")
 
+    def cancel(self):
+        self.cancelled = True
+
     async def run(self, timeout=2., verbose=True):
+        fd = None
+        if timeout is None:
+            # Never timeout
+            timeout = 9999999999999999.
         if not timeout or self.output_cb is None:
             # Fire and forget commands cannot be verbose as we can't
             # clean up after the process terminates
@@ -50,7 +58,7 @@ class ShellCommand:
                 self.command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         except Exception:
             logging.exception(
-                "shell_command: Command {%s} failed" % (self.name))
+                f"shell_command: Command ({self.name}) failed")
             return
         if verbose:
             fd = proc.stdout.fileno()
@@ -58,7 +66,7 @@ class ShellCommand:
                 fd, self._process_output, IOLoop.READ | IOLoop.ERROR)
         elif not timeout:
             # fire and forget, return from execution
-            return
+            return True
         sleeptime = 0
         complete = False
         while sleeptime < timeout:
@@ -67,6 +75,8 @@ class ShellCommand:
             if proc.poll() is not None:
                 complete = True
                 break
+            if self.cancelled:
+                break
         if not complete:
             proc.terminate()
         if verbose:
@@ -74,15 +84,18 @@ class ShellCommand:
                 self.output_cb(self.partial_output)
                 self.partial_output = b""
             if complete:
-                msg = "Command {%s} finished" % (self.name)
+                msg = f"Command ({self.name}) finished"
+            elif self.cancelled:
+                msg = f"Command ({self.name}) cancelled"
             else:
-                msg = "Command {%s} timed out" % (self.name)
+                msg = f"Command ({self.name}) timed out"
             logging.info(msg)
             self.io_loop.remove_handler(fd)
+        return complete
 
 class ShellCommandFactory:
     def build_shell_command(self, cmd, callback):
         return ShellCommand(cmd, callback)
 
-def load_plugin(server):
+def load_plugin(config):
     return ShellCommandFactory()
